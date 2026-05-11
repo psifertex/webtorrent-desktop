@@ -9,6 +9,12 @@ on:
         required: false
         default: ''
 
+# Needed for `gh release upload` against an existing release. Without
+# contents:write the default GITHUB_TOKEN gets HTTP 403 from the
+# releases API.
+permissions:
+  contents: write
+
 jobs:
   package_linux:
     runs-on: ubuntu-latest
