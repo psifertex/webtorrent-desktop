@@ -11,33 +11,43 @@
 
 <h4 align="center">The streaming torrent app. For Mac, Windows, and Linux.</h4>
 
-<p align="center">
-  <a href="https://discord.gg/cnXkm4Z"><img src="https://img.shields.io/discord/612575111718895616" alt="discord"></a>
-  <a href="https://github.com/webtorrent/webtorrent-desktop/actions/workflows/ci.yml"><img src="https://github.com/webtorrent/webtorrent-desktop/actions/workflows/ci.yml/badge.svg" alt="GitHub CI action"></a>
-  <a href="https://github.com/webtorrent/webtorrent-desktop/releases"><img src="https://img.shields.io/github/release/webtorrent/webtorrent-desktop.svg" alt="github release version"></a>
-  <a href="https://github.com/webtorrent/webtorrent-desktop/releases"><img src="https://img.shields.io/github/downloads/webtorrent/webtorrent-desktop/total.svg" alt="github release downloads"></a>
-  <a href="https://standardjs.com"><img src="https://img.shields.io/badge/code_style-standard-brightgreen.svg" alt="Standard - JavaScript Style Guide"></a>
-</p>
+> **Fork notice.** This is the [`psifertex/webtorrent-desktop`](https://github.com/psifertex/webtorrent-desktop) fork. It exists to publish a **universal macOS build** that runs natively on both Apple Silicon (M1/M2/M3/…) and Intel Macs — addressing the long-standing upstream gap tracked in [webtorrent/webtorrent-desktop#1907](https://github.com/webtorrent/webtorrent-desktop/issues/1907) (open since Dec 2020). The Windows and Linux build flow is unchanged from upstream; use the upstream releases or build locally for those platforms.
 
 ## Install
 
-### Recommended Install
+### macOS (this fork's universal build)
 
-Download the latest version of WebTorrent Desktop from
-[the official website](https://webtorrent.io/desktop/):
+Download the universal `.zip` from the **[fork's releases page](https://github.com/psifertex/webtorrent-desktop/releases)**. The artifact (`WebTorrent-v<version>-darwin-universal.zip`) contains a single `.app` whose binaries are fat Mach-O — it runs natively on both `arm64` (Apple Silicon) and `x86_64` (Intel), no Rosetta needed.
 
-### [✨ Download WebTorrent Desktop ✨](https://webtorrent.io/desktop/)
+**The fork build is not signed or notarized.** macOS Gatekeeper will refuse to open it on first launch. Pick one workaround:
 
-### Advanced Install
+1. **Right-click → Open** (recommended). After unzipping and dragging `WebTorrent.app` into `/Applications`, right-click (or Control-click) the app and choose **Open**, then click **Open** in the dialog. macOS remembers the exception.
 
-- Download specific installer files from the [GitHub releases](https://github.com/webtorrent/webtorrent-desktop/releases) page.
+2. **Strip the quarantine attribute** from the command line:
 
-- Use [Homebrew-Cask](https://github.com/caskroom/homebrew-cask) to install from the command line:
+   ```sh
+   xattr -cr /Applications/WebTorrent.app
+   ```
 
-  ```
-  $ brew install --cask webtorrent
-  ```
+   `-c` clears all extended attributes (including `com.apple.quarantine`); `-r` recurses into the bundle. Run this once after copying the app to `/Applications`.
 
+3. **System Settings fallback.** If Gatekeeper still blocks it, open **System Settings → Privacy & Security**, scroll to the bottom, and click **Open Anyway** next to the WebTorrent entry that appears after your first blocked launch attempt.
+
+4. **Sign it yourself** with an ad-hoc signature (no Apple Developer account needed):
+
+   ```sh
+   codesign --force --deep --sign - /Applications/WebTorrent.app
+   ```
+
+   This produces a locally-trusted signature that satisfies Gatekeeper on the same machine. It will *not* satisfy Gatekeeper on other machines — for true distribution you need a Developer ID certificate and notarization.
+
+### Windows and Linux
+
+This fork does not ship Windows or Linux builds. Use upstream:
+
+- [✨ Download WebTorrent Desktop ✨](https://webtorrent.io/desktop/) (official upstream site)
+- [Upstream GitHub releases](https://github.com/webtorrent/webtorrent-desktop/releases) for specific installer files
+- [Homebrew-Cask](https://github.com/caskroom/homebrew-cask): `brew install --cask webtorrent` (Mac/Linux)
 - Try the (unstable) development version by cloning the Git repository. See the
   ["How to Contribute"](#how-to-contribute) instructions.
 
@@ -53,7 +63,7 @@ Download the latest version of WebTorrent Desktop from
 ### Get the code
 
 ```
-$ git clone https://github.com/webtorrent/webtorrent-desktop.git
+$ git clone https://github.com/psifertex/webtorrent-desktop.git
 $ cd webtorrent-desktop
 $ npm install
 ```
@@ -123,14 +133,25 @@ Where `[platform]` is `darwin`, `linux`, `win32`, or `all` (default).
 The following optional arguments are available:
 
 - `--sign` - Sign the application (Mac, Windows)
+- `--arch=[list]` - Override the default architecture list for the target platform. Comma-separated; defaults below.
+   - `darwin` default: `x64,arm64`. Use `--arch=universal` for a single fat Mach-O binary (recommended for distribution).
+   - `linux` default: `x64,armv7l,arm64`.
+   - `win32` is x64 only.
+- `--skipInstall` - Skip the automatic `npm ci` step. Useful for iterative testing once `node_modules` is already in place.
 - `--package=[type]` - Package single output type.
    - `deb` - Debian package
    - `rpm` - RedHat package
-   - `zip` - Linux zip file
+   - `zip` - Linux/Mac zip file (Mac zip names include the arch, e.g. `-darwin-universal.zip`)
    - `dmg` - Mac disk image
    - `exe` - Windows installer
    - `portable` - Windows portable app
    - `all` - All platforms (default)
+
+Example — produce just the universal macOS zip used by this fork's release:
+
+```sh
+$ npm run package -- darwin --arch=universal --package=zip
+```
 
 Note: Even with the `--package` option, the auto-update files (.nupkg for Windows,
 -darwin.zip for Mac) will always be produced.
