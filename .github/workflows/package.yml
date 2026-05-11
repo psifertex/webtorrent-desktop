@@ -1,69 +1,95 @@
 name: package
-on: 
+
+on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing release tag to attach artifacts to (e.g. v0.24.1). Leave empty to only produce ephemeral workflow artifacts.'
+        type: string
+        required: false
+        default: ''
+
 jobs:
   package_linux:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
-    - uses: actions/setup-node@v3
-      with:
-        node-version: '16'
-    - uses: actions/cache@v3
-      with:
-        path: ~/.npm
-        key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
-        restore-keys: |
-          ${{ runner.os }}-node-
-    - run: npm install
-    - run: npm run package -- linux
-    - uses: actions/upload-artifact@v3
-      with:
-        name: linux
-        path: |
-          dist/*.deb
-          dist/*.rpm
-          dist/*.zip
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run package -- linux --skipInstall
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          if-no-files-found: error
+          path: |
+            dist/*.deb
+            dist/*.rpm
+            dist/*.zip
+      - name: Upload to release
+        if: ${{ inputs.release_tag != '' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s nullglob
+          files=(dist/*.deb dist/*.rpm dist/*.zip)
+          gh release upload "${{ inputs.release_tag }}" "${files[@]}" --clobber
+
   package_macos:
     runs-on: macos-latest
     steps:
-    - uses: actions/checkout@v3
-    - uses: actions/setup-node@v3
-      with:
-        node-version: '16'
-    - uses: actions/cache@v3
-      with:
-        path: ~/.npm
-        key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
-        restore-keys: |
-          ${{ runner.os }}-node-
-    - run: npm install
-    - run: npm run package -- darwin
-    - uses: actions/upload-artifact@v3
-      with:
-        name: macos
-        path: |
-          dist/*.dmg
-          dist/*.zip
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      # Universal Mach-O: single .app that runs natively on Intel + Apple Silicon.
+      # Use --package=zip to avoid the legacy appdmg@^0.6.0 dependency, which is
+      # known to break on modern macOS runners.
+      - run: npm run package -- darwin --arch=universal --package=zip --skipInstall
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          if-no-files-found: error
+          path: dist/*.zip
+      - name: Upload to release
+        if: ${{ inputs.release_tag != '' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s nullglob
+          files=(dist/*.zip)
+          gh release upload "${{ inputs.release_tag }}" "${files[@]}" --clobber
+
   package_windows:
     runs-on: windows-latest
     steps:
-    - uses: actions/checkout@v3
-    - uses: actions/setup-node@v3
-      with:
-        node-version: '16'
-    - uses: actions/cache@v3
-      with:
-        path: ~/.npm
-        key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
-        restore-keys: |
-          ${{ runner.os }}-node-
-    - run: npm install
-    - run: npm run package -- win32
-    - uses: actions/upload-artifact@v3
-      with:
-        name: windows
-        path: |
-          dist/*.exe
-          dist/*.nupkg
-          dist/*.zip
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run package -- win32 --skipInstall
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          if-no-files-found: error
+          path: |
+            dist/*.exe
+            dist/*.nupkg
+            dist/*.zip
+      - name: Upload to release
+        if: ${{ inputs.release_tag != '' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s nullglob
+          files=(dist/*.exe dist/*.nupkg dist/*.zip)
+          gh release upload "${{ inputs.release_tag }}" "${files[@]}" --clobber
