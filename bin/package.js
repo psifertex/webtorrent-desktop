@@ -24,21 +24,34 @@ const NODE_MODULES_PATH = path.join(config.ROOT_PATH, 'node_modules')
 
 const argv = minimist(process.argv.slice(2), {
   boolean: [
-    'sign'
+    'sign',
+    'skipInstall'
   ],
   default: {
     package: 'all',
-    sign: false
+    sign: false,
+    skipInstall: false,
+    arch: ''
   },
   string: [
-    'package'
+    'package',
+    'arch'
   ]
 })
 
+// Comma-separated arch list, e.g. "arm64" or "x64,arm64". Empty = platform default.
+const archOverride = argv.arch
+  ? argv.arch.split(',').map(s => s.trim()).filter(Boolean)
+  : null
+
 function build () {
-  console.log('Installing node_modules...')
-  rimraf.sync(NODE_MODULES_PATH)
-  cp.execSync('npm ci', { stdio: 'inherit' })
+  if (!argv.skipInstall) {
+    console.log('Installing node_modules...')
+    rimraf.sync(NODE_MODULES_PATH)
+    cp.execSync('npm ci', { stdio: 'inherit' })
+  } else {
+    console.log('Skipping node_modules install (--skipInstall).')
+  }
 
   console.log('Nuking dist/ and build/...')
   rimraf.sync(DIST_PATH)
@@ -117,8 +130,8 @@ const darwin = {
   // Build for Mac
   platform: 'darwin',
 
-  // Build x64 binary only.
-  arch: 'x64',
+  // Build x64 and arm64 (Apple Silicon) binaries. Override with --arch=...
+  arch: archOverride || ['x64', 'arm64'],
 
   // The bundle identifier to use in the application's plist (Mac only).
   appBundleId: 'io.webtorrent.webtorrent',
@@ -173,7 +186,7 @@ const linux = {
   platform: 'linux',
 
   // Build x64, armv7l, and arm64 binaries.
-  arch: ['x64', 'armv7l', 'arm64']
+  arch: archOverride || ['x64', 'armv7l', 'arm64']
 
   // Note: Application icon for Linux is specified via the BrowserWindow `icon` option.
 }
@@ -184,196 +197,195 @@ function buildDarwin (cb) {
   const plist = require('plist')
 
   console.log('Mac: Packaging electron...')
-  electronPackager(Object.assign({}, all, darwin)).then(function (buildPath) {
-    console.log('Mac: Packaged electron. ' + buildPath)
+  electronPackager(Object.assign({}, all, darwin)).then(function (buildPaths) {
+    console.log('Mac: Packaged electron. ' + buildPaths)
 
-    const appPath = path.join(buildPath[0], config.APP_NAME + '.app')
-    const contentsPath = path.join(appPath, 'Contents')
-    const resourcesPath = path.join(contentsPath, 'Resources')
-    const infoPlistPath = path.join(contentsPath, 'Info.plist')
-    const infoPlist = plist.parse(fs.readFileSync(infoPlistPath, 'utf8'))
+    // electron-packager returns one path per arch. Process each sequentially.
+    const tasks = buildPaths.map(function (filesPath) {
+      return function (next) { processOneArch(filesPath, next) }
+    })
+    series(tasks, cb)
 
-    infoPlist.CFBundleDocumentTypes = [
-      {
-        CFBundleTypeExtensions: ['torrent'],
-        CFBundleTypeIconFile: path.basename(config.APP_FILE_ICON) + '.icns',
-        CFBundleTypeName: 'BitTorrent Document',
-        CFBundleTypeRole: 'Editor',
-        LSHandlerRank: 'Owner',
-        LSItemContentTypes: ['org.bittorrent.torrent']
-      },
-      {
-        CFBundleTypeName: 'Any',
-        CFBundleTypeOSTypes: ['****'],
-        CFBundleTypeRole: 'Editor',
-        LSHandlerRank: 'Owner',
-        LSTypeIsPackage: false
-      }
-    ]
+    function processOneArch (filesPath, doneArch) {
+      // Detect arch from directory name (e.g. ".../WebTorrent-darwin-arm64").
+      const archMatch = path.basename(filesPath).match(/-(arm64|x64|universal)$/)
+      const arch = archMatch ? archMatch[1] : 'unknown'
+      console.log('Mac[' + arch + ']: Processing ' + filesPath)
 
-    infoPlist.CFBundleURLTypes = [
-      {
-        CFBundleTypeRole: 'Editor',
-        CFBundleURLIconFile: path.basename(config.APP_FILE_ICON) + '.icns',
-        CFBundleURLName: 'BitTorrent Magnet URL',
-        CFBundleURLSchemes: ['magnet']
-      },
-      {
-        CFBundleTypeRole: 'Editor',
-        CFBundleURLIconFile: path.basename(config.APP_FILE_ICON) + '.icns',
-        CFBundleURLName: 'BitTorrent Stream-Magnet URL',
-        CFBundleURLSchemes: ['stream-magnet']
-      }
-    ]
+      const appPath = path.join(filesPath, config.APP_NAME + '.app')
+      const contentsPath = path.join(appPath, 'Contents')
+      const resourcesPath = path.join(contentsPath, 'Resources')
+      const infoPlistPath = path.join(contentsPath, 'Info.plist')
+      const infoPlist = plist.parse(fs.readFileSync(infoPlistPath, 'utf8'))
 
-    infoPlist.UTExportedTypeDeclarations = [
-      {
-        UTTypeConformsTo: [
-          'public.data',
-          'public.item',
-          'com.bittorrent.torrent'
-        ],
-        UTTypeDescription: 'BitTorrent Document',
-        UTTypeIconFile: path.basename(config.APP_FILE_ICON) + '.icns',
-        UTTypeIdentifier: 'org.bittorrent.torrent',
-        UTTypeReferenceURL: 'http://www.bittorrent.org/beps/bep_0000.html',
-        UTTypeTagSpecification: {
-          'com.apple.ostype': 'TORR',
-          'public.filename-extension': ['torrent'],
-          'public.mime-type': 'application/x-bittorrent'
+      infoPlist.CFBundleDocumentTypes = [
+        {
+          CFBundleTypeExtensions: ['torrent'],
+          CFBundleTypeIconFile: path.basename(config.APP_FILE_ICON) + '.icns',
+          CFBundleTypeName: 'BitTorrent Document',
+          CFBundleTypeRole: 'Editor',
+          LSHandlerRank: 'Owner',
+          LSItemContentTypes: ['org.bittorrent.torrent']
+        },
+        {
+          CFBundleTypeName: 'Any',
+          CFBundleTypeOSTypes: ['****'],
+          CFBundleTypeRole: 'Editor',
+          LSHandlerRank: 'Owner',
+          LSTypeIsPackage: false
         }
-      }
-    ]
+      ]
 
-    fs.writeFileSync(infoPlistPath, plist.build(infoPlist))
+      infoPlist.CFBundleURLTypes = [
+        {
+          CFBundleTypeRole: 'Editor',
+          CFBundleURLIconFile: path.basename(config.APP_FILE_ICON) + '.icns',
+          CFBundleURLName: 'BitTorrent Magnet URL',
+          CFBundleURLSchemes: ['magnet']
+        },
+        {
+          CFBundleTypeRole: 'Editor',
+          CFBundleURLIconFile: path.basename(config.APP_FILE_ICON) + '.icns',
+          CFBundleURLName: 'BitTorrent Stream-Magnet URL',
+          CFBundleURLSchemes: ['stream-magnet']
+        }
+      ]
 
-    // Copy torrent file icon into app bundle
-    cp.execSync(`cp ${config.APP_FILE_ICON + '.icns'} ${resourcesPath}`)
+      infoPlist.UTExportedTypeDeclarations = [
+        {
+          UTTypeConformsTo: [
+            'public.data',
+            'public.item',
+            'com.bittorrent.torrent'
+          ],
+          UTTypeDescription: 'BitTorrent Document',
+          UTTypeIconFile: path.basename(config.APP_FILE_ICON) + '.icns',
+          UTTypeIdentifier: 'org.bittorrent.torrent',
+          UTTypeReferenceURL: 'http://www.bittorrent.org/beps/bep_0000.html',
+          UTTypeTagSpecification: {
+            'com.apple.ostype': 'TORR',
+            'public.filename-extension': ['torrent'],
+            'public.mime-type': 'application/x-bittorrent'
+          }
+        }
+      ]
 
-    if (process.platform === 'darwin') {
-      if (argv.sign) {
-        signApp(function (err) {
-          if (err) return cb(err)
-          pack(cb)
-        })
+      fs.writeFileSync(infoPlistPath, plist.build(infoPlist))
+
+      // Copy torrent file icon into app bundle
+      cp.execSync(`cp ${config.APP_FILE_ICON + '.icns'} ${resourcesPath}`)
+
+      if (process.platform === 'darwin') {
+        if (argv.sign) {
+          signApp(function (err) {
+            if (err) return doneArch(err)
+            pack(doneArch)
+          })
+        } else {
+          printWarning()
+          pack(doneArch)
+        }
       } else {
         printWarning()
-        pack(cb)
-      }
-    } else {
-      printWarning()
-    }
-
-    function signApp (cb) {
-      const sign = require('electron-osx-sign')
-      const { notarize } = require('electron-notarize')
-
-      /*
-       * Sign the app with Apple Developer ID certificates. We sign the app for 2 reasons:
-       *   - So the auto-updater (Squirrrel.Mac) can check that app updates are signed by
-       *     the same author as the current version.
-       *   - So users will not a see a warning about the app coming from an "Unidentified
-       *     Developer" when they open it for the first time (Mac Gatekeeper).
-       *
-       * To sign an Mac app for distribution outside the App Store, the following are
-       * required:
-       *   - Xcode
-       *   - Xcode Command Line Tools (xcode-select --install)
-       *   - Membership in the Apple Developer Program
-       */
-      const signOpts = {
-        verbose: true,
-        app: appPath,
-        platform: 'darwin',
-        identity: 'Developer ID Application: WebTorrent, LLC (5MAMC8G3L8)',
-        hardenedRuntime: true,
-        entitlements: path.join(config.ROOT_PATH, 'bin', 'darwin-entitlements.plist'),
-        'entitlements-inherit': path.join(config.ROOT_PATH, 'bin', 'darwin-entitlements.plist'),
-        'signature-flags': 'library'
+        doneArch(null)
       }
 
-      const notarizeOpts = {
-        appBundleId: darwin.appBundleId,
-        appPath,
-        appleId: 'feross@feross.org',
-        appleIdPassword: '@keychain:AC_PASSWORD'
+      function signApp (cb) {
+        const sign = require('electron-osx-sign')
+        const { notarize } = require('electron-notarize')
+
+        const signOpts = {
+          verbose: true,
+          app: appPath,
+          platform: 'darwin',
+          identity: 'Developer ID Application: WebTorrent, LLC (5MAMC8G3L8)',
+          hardenedRuntime: true,
+          entitlements: path.join(config.ROOT_PATH, 'bin', 'darwin-entitlements.plist'),
+          'entitlements-inherit': path.join(config.ROOT_PATH, 'bin', 'darwin-entitlements.plist'),
+          'signature-flags': 'library'
+        }
+
+        const notarizeOpts = {
+          appBundleId: darwin.appBundleId,
+          appPath,
+          appleId: 'feross@feross.org',
+          appleIdPassword: '@keychain:AC_PASSWORD'
+        }
+
+        console.log('Mac[' + arch + ']: Signing app...')
+        sign(signOpts, function (err) {
+          if (err) return cb(err)
+          console.log('Mac[' + arch + ']: Signed app.')
+
+          console.log('Mac[' + arch + ']: Notarizing app...')
+          notarize(notarizeOpts).then(
+            function () {
+              console.log('Mac[' + arch + ']: Notarized app.')
+              cb(null)
+            },
+            function (err) {
+              cb(err)
+            })
+        })
       }
 
-      console.log('Mac: Signing app...')
-      sign(signOpts, function (err) {
-        if (err) return cb(err)
-        console.log('Mac: Signed app.')
+      function pack (cb) {
+        packageZip()
 
-        console.log('Mac: Notarizing app...')
-        notarize(notarizeOpts).then(
-          function () {
-            console.log('Mac: Notarized app.')
-            cb(null)
-          },
-          function (err) {
-            cb(err)
-          })
-      })
-    }
-
-    function pack (cb) {
-      packageZip() // always produce .zip file, used for automatic updates
-
-      if (argv.package === 'dmg' || argv.package === 'all') {
-        packageDmg(cb)
-      }
-    }
-
-    function packageZip () {
-      // Create .zip file (used by the auto-updater)
-      console.log('Mac: Creating zip...')
-
-      const inPath = path.join(buildPath[0], config.APP_NAME + '.app')
-      const outPath = path.join(DIST_PATH, BUILD_NAME + '-darwin.zip')
-      zip.zipSync(inPath, outPath)
-
-      console.log('Mac: Created zip.')
-    }
-
-    function packageDmg (cb) {
-      console.log('Mac: Creating dmg...')
-
-      const appDmg = require('appdmg')
-
-      const targetPath = path.join(DIST_PATH, BUILD_NAME + '.dmg')
-      rimraf.sync(targetPath)
-
-      // Create a .dmg (Mac disk image) file, for easy user installation.
-      const dmgOpts = {
-        basepath: config.ROOT_PATH,
-        target: targetPath,
-        specification: {
-          title: config.APP_NAME,
-          icon: config.APP_ICON + '.icns',
-          background: path.join(config.STATIC_PATH, 'appdmg.png'),
-          'icon-size': 128,
-          contents: [
-            { x: 122, y: 240, type: 'file', path: appPath },
-            { x: 380, y: 240, type: 'link', path: '/Applications' },
-            // Hide hidden icons out of view, for users who have hidden files shown.
-            // https://github.com/LinusU/node-appdmg/issues/45#issuecomment-153924954
-            { x: 50, y: 500, type: 'position', path: '.background' },
-            { x: 100, y: 500, type: 'position', path: '.DS_Store' },
-            { x: 150, y: 500, type: 'position', path: '.Trashes' },
-            { x: 200, y: 500, type: 'position', path: '.VolumeIcon.icns' }
-          ]
+        if (argv.package === 'dmg' || argv.package === 'all') {
+          packageDmg(cb)
+        } else {
+          cb(null)
         }
       }
 
-      const dmg = appDmg(dmgOpts)
-      dmg.once('error', cb)
-      dmg.on('progress', function (info) {
-        if (info.type === 'step-begin') console.log(info.title + '...')
-      })
-      dmg.once('finish', function (info) {
-        console.log('Mac: Created dmg.')
-        cb(null)
-      })
+      function packageZip () {
+        console.log('Mac[' + arch + ']: Creating zip...')
+        const inPath = path.join(filesPath, config.APP_NAME + '.app')
+        const outPath = path.join(DIST_PATH, BUILD_NAME + '-darwin-' + arch + '.zip')
+        zip.zipSync(inPath, outPath)
+        console.log('Mac[' + arch + ']: Created zip at ' + outPath)
+      }
+
+      function packageDmg (cb) {
+        console.log('Mac[' + arch + ']: Creating dmg...')
+
+        const appDmg = require('appdmg')
+
+        const targetPath = path.join(DIST_PATH, BUILD_NAME + '-' + arch + '.dmg')
+        rimraf.sync(targetPath)
+
+        const dmgOpts = {
+          basepath: config.ROOT_PATH,
+          target: targetPath,
+          specification: {
+            title: config.APP_NAME,
+            icon: config.APP_ICON + '.icns',
+            background: path.join(config.STATIC_PATH, 'appdmg.png'),
+            'icon-size': 128,
+            contents: [
+              { x: 122, y: 240, type: 'file', path: appPath },
+              { x: 380, y: 240, type: 'link', path: '/Applications' },
+              // Hide hidden icons out of view, for users who have hidden files shown.
+              // https://github.com/LinusU/node-appdmg/issues/45#issuecomment-153924954
+              { x: 50, y: 500, type: 'position', path: '.background' },
+              { x: 100, y: 500, type: 'position', path: '.DS_Store' },
+              { x: 150, y: 500, type: 'position', path: '.Trashes' },
+              { x: 200, y: 500, type: 'position', path: '.VolumeIcon.icns' }
+            ]
+          }
+        }
+
+        const dmg = appDmg(dmgOpts)
+        dmg.once('error', cb)
+        dmg.on('progress', function (info) {
+          if (info.type === 'step-begin') console.log(info.title + '...')
+        })
+        dmg.once('finish', function (info) {
+          console.log('Mac[' + arch + ']: Created dmg at ' + targetPath)
+          cb(null)
+        })
+      }
     }
   }).catch(function (err) {
     cb(err)
