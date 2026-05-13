@@ -9,9 +9,9 @@ on:
         required: false
         default: ''
 
-# Needed for `gh release upload` against an existing release. Without
-# contents:write the default GITHUB_TOKEN gets HTTP 403 from the
-# releases API.
+# Needed for `gh release upload` / `gh release edit` against an existing
+# release. Without contents:write the default GITHUB_TOKEN gets HTTP 403
+# from the releases API.
 permissions:
   contents: write
 
@@ -26,6 +26,14 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - run: npm run package -- linux --skipInstall
+      - name: Compute checksums
+        shell: bash
+        run: |
+          cd dist
+          shopt -s nullglob
+          files=(*.deb *.rpm *.zip)
+          shasum -a 256 "${files[@]}" > SHA256SUMS-linux.txt
+          cat SHA256SUMS-linux.txt
       - uses: actions/upload-artifact@v4
         with:
           name: linux
@@ -34,6 +42,7 @@ jobs:
             dist/*.deb
             dist/*.rpm
             dist/*.zip
+            dist/SHA256SUMS-linux.txt
       - name: Upload to release
         if: ${{ inputs.release_tag != '' }}
         shell: bash
@@ -41,7 +50,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           shopt -s nullglob
-          files=(dist/*.deb dist/*.rpm dist/*.zip)
+          files=(dist/*.deb dist/*.rpm dist/*.zip dist/SHA256SUMS-linux.txt)
           gh release upload "${{ inputs.release_tag }}" "${files[@]}" --clobber
 
   package_macos:
@@ -57,11 +66,21 @@ jobs:
       # Use --package=zip to avoid the legacy appdmg@^0.6.0 dependency, which is
       # known to break on modern macOS runners.
       - run: npm run package -- darwin --arch=universal --package=zip --skipInstall
+      - name: Compute checksums
+        shell: bash
+        run: |
+          cd dist
+          shopt -s nullglob
+          files=(*.zip)
+          shasum -a 256 "${files[@]}" > SHA256SUMS-darwin.txt
+          cat SHA256SUMS-darwin.txt
       - uses: actions/upload-artifact@v4
         with:
           name: macos
           if-no-files-found: error
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS-darwin.txt
       - name: Upload to release
         if: ${{ inputs.release_tag != '' }}
         shell: bash
@@ -69,7 +88,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           shopt -s nullglob
-          files=(dist/*.zip)
+          files=(dist/*.zip dist/SHA256SUMS-darwin.txt)
           gh release upload "${{ inputs.release_tag }}" "${files[@]}" --clobber
 
   package_windows:
@@ -82,6 +101,15 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - run: npm run package -- win32 --skipInstall
+      - name: Compute checksums
+        shell: bash
+        run: |
+          cd dist
+          shopt -s nullglob
+          files=(*.exe *.nupkg *.zip)
+          # sha256sum is preinstalled in Git Bash on windows-latest.
+          sha256sum "${files[@]}" > SHA256SUMS-win32.txt
+          cat SHA256SUMS-win32.txt
       - uses: actions/upload-artifact@v4
         with:
           name: windows
@@ -90,6 +118,7 @@ jobs:
             dist/*.exe
             dist/*.nupkg
             dist/*.zip
+            dist/SHA256SUMS-win32.txt
       - name: Upload to release
         if: ${{ inputs.release_tag != '' }}
         shell: bash
@@ -97,5 +126,80 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           shopt -s nullglob
-          files=(dist/*.exe dist/*.nupkg dist/*.zip)
+          files=(dist/*.exe dist/*.nupkg dist/*.zip dist/SHA256SUMS-win32.txt)
           gh release upload "${{ inputs.release_tag }}" "${files[@]}" --clobber
+
+  # After all three platform builds upload their per-platform checksum files,
+  # this job downloads them, combines into a single SHA256SUMS.txt asset,
+  # and patches the release body to insert/refresh a checksums table between
+  # the <!-- AUTO-CHECKSUMS-START --> / <!-- AUTO-CHECKSUMS-END --> markers.
+  # If the markers aren't present in the body, the table is appended.
+  publish_checksums:
+    needs: [package_linux, package_macos, package_windows]
+    if: ${{ inputs.release_tag != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download per-platform checksum files from release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p sums
+          gh release download "${{ inputs.release_tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern 'SHA256SUMS-*.txt' \
+            --dir sums
+          ls -la sums/
+      - name: Combine into SHA256SUMS.txt
+        shell: bash
+        run: |
+          # shasum -c-compatible format: "<hash>  <filename>" per line, sorted by filename.
+          cat sums/SHA256SUMS-*.txt | sort -k2 > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Upload combined SHA256SUMS.txt
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ inputs.release_tag }}" SHA256SUMS.txt \
+            --repo "${{ github.repository }}" --clobber
+      - name: Patch release body with checksums table
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          gh release view "$TAG" --repo "${{ github.repository }}" \
+            --json body --jq .body > current-body.md
+          python3 <<'PY'
+          import os, pathlib, re
+          tag = os.environ['TAG']
+          body = pathlib.Path('current-body.md').read_text()
+          sums = pathlib.Path('SHA256SUMS.txt').read_text().strip().splitlines()
+          rows = []
+          for line in sums:
+              parts = line.split(None, 1)
+              if len(parts) != 2: continue
+              hsh, fname = parts
+              # filenames in shasum output may have a leading '*' for binary mode (sha256sum on win)
+              fname = fname.lstrip('*').strip()
+              rows.append(f'| `{fname}` | `{hsh}` |')
+          table = '\n'.join(['| File | SHA-256 |', '|---|---|'] + rows)
+          marker_re = re.compile(
+              r'<!-- AUTO-CHECKSUMS-START -->.*?<!-- AUTO-CHECKSUMS-END -->',
+              re.DOTALL,
+          )
+          replacement = f'<!-- AUTO-CHECKSUMS-START -->\n{table}\n<!-- AUTO-CHECKSUMS-END -->'
+          if marker_re.search(body):
+              new_body = marker_re.sub(replacement, body)
+          else:
+              # No markers yet — append a Verification section at the bottom.
+              new_body = body.rstrip() + (
+                  '\n\n## Verification\n\n'
+                  'SHA-256 of each release asset (auto-generated):\n\n'
+                  f'{replacement}\n'
+              )
+          pathlib.Path('new-body.md').write_text(new_body)
+          PY
+          gh release edit "$TAG" --repo "${{ github.repository }}" \
+            --notes-file new-body.md
