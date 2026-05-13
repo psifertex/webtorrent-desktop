@@ -163,7 +163,7 @@ jobs:
         run: |
           gh release upload "${{ inputs.release_tag }}" SHA256SUMS.txt \
             --repo "${{ github.repository }}" --clobber
-      - name: Patch release body with checksums table
+      - name: Fetch release asset metadata (for sizes)
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -171,11 +171,20 @@ jobs:
         run: |
           gh release view "$TAG" --repo "${{ github.repository }}" \
             --json body --jq .body > current-body.md
+          gh release view "$TAG" --repo "${{ github.repository }}" \
+            --json assets --jq .assets > assets.json
+      - name: Patch release body with checksums table
+        shell: bash
+        run: |
           python3 <<'PY'
-          import os, pathlib, re
-          tag = os.environ['TAG']
+          import json, pathlib, re
           body = pathlib.Path('current-body.md').read_text()
           sums = pathlib.Path('SHA256SUMS.txt').read_text().strip().splitlines()
+          assets = json.loads(pathlib.Path('assets.json').read_text())
+          size_by_name = {a['name']: a['size'] for a in assets}
+          def fmt_size(b):
+              if b is None: return '—'
+              return f'{round(b/1024/1024)} MB'
           rows = []
           for line in sums:
               parts = line.split(None, 1)
@@ -183,8 +192,8 @@ jobs:
               hsh, fname = parts
               # filenames in shasum output may have a leading '*' for binary mode (sha256sum on win)
               fname = fname.lstrip('*').strip()
-              rows.append(f'| `{fname}` | `{hsh}` |')
-          table = '\n'.join(['| File | SHA-256 |', '|---|---|'] + rows)
+              rows.append(f'| `{fname}` | {fmt_size(size_by_name.get(fname))} | `{hsh}` |')
+          table = '\n'.join(['| File | Size | SHA-256 |', '|---|---:|---|'] + rows)
           marker_re = re.compile(
               r'<!-- AUTO-CHECKSUMS-START -->.*?<!-- AUTO-CHECKSUMS-END -->',
               re.DOTALL,
@@ -201,5 +210,11 @@ jobs:
               )
           pathlib.Path('new-body.md').write_text(new_body)
           PY
+      - name: Push updated body
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
           gh release edit "$TAG" --repo "${{ github.repository }}" \
             --notes-file new-body.md
